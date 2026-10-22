@@ -1,0 +1,7 @@
+{
+  "folder": "ground",
+  "sizes": [1024],
+  "sets": {
+    "sand": { "set": "Ground055S_4K-JPG", "maps": ["color", "normal"] }
+  }
+}

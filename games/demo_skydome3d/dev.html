@@ -1,0 +1,229 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>demo_skydome3d dev</title>
+    <style>
+      body { margin: 0; background: #0b0b0e; display: grid; place-items: center; height: 100vh }
+      canvas { grid-area: 1 / 1 }
+      .lil-gui.root { max-height: 100vh; overflow-y: auto }
+    </style>
+  </head>
+  <body>
+    <script type="module">
+      // The demo: index.html with three's lil-gui at the top right, the sky's panel. `?scene=<name>`
+      // enters another scene directly.
+      //
+      // The plugins folder switches weather3d and clouds3d on and off: a change loads the page again
+      // with `?weather=0` or `?clouds=0`, and this page's own copy of main.scene.json, which the
+      // scenemanager boots, is written without the plugin before the boot: out of `plugins`, its
+      // `world` entry and the mods that name it, and the weather's row out of `actors`. The clouds
+      // draw the weather's clouds, so with the weather off they draw none.
+      //
+      // The clock folder sets the skydome3d row's `t` (as hours of the day), `rate`, `doy`, `lat` and
+      // `phase` on the truth in this tab, and follows them as the clock runs. The weather folder fades
+      // the weather3d row to any weather of the weathers file over the fade given, as its `weather` act
+      // does, and follows the ground's wet and snow and the wind's way. Every other folder sets every
+      // number and colour of this page's own copy of `world.skydome3d`'s look and shadow,
+      // `world.weather3d`'s look and precip, and `world.clouds3d`'s look, which the plugins draw from
+      // each frame; each change hands its plugin a new object. Nothing is written to disk and the truth
+      // keeps the file's: `copy JSON` copies every one of them as the panel has them, for
+      // `main.scene.json`. The panel is made again when the seat moves to another scene.
+      //
+      // The truths this tab holds are on `window.__scenes` and the page on `window.__page`, for the
+      // benchmarking skill's profilers.
+      import { boot } from '#engine/engine.ts'
+      import { accept, load, manager, link, view } from '#addons/scenemanager/scenemanager.addon.ts'
+      import { loopback } from '#addons/loopback/loopback.addon.ts'
+      import GUI from 'lil-gui'
+      import { sim } from './demo_skydome3d.sim.ts'
+      import { scene as main } from './main.sim.ts'
+      import file from './demo_skydome3d.scene.json'
+      const params = new URLSearchParams(location.search)
+      file.prefabs.scenemanager.entry = params.get('scene') ?? file.prefabs.scenemanager.entry
+
+      // The plugins switched off in this page's copy of main.scene.json, before the boot reads it.
+      const on = { weather3d: params.get('weather') !== '0', clouds3d: params.get('clouds') !== '0' }
+      const drop = name => {
+        main.plugins = main.plugins.filter(p => p !== name)
+        main.actors = main.actors.filter(a => a.is !== name)
+        delete main.world[name]
+        for (const entry of Object.values(main.world)) {
+          const mods = entry && typeof entry === 'object' ? entry.mods : undefined
+          if (mods) for (const [k, v] of Object.entries(mods)) if (v === name) delete mods[k]
+        }
+      }
+      if (!on.clouds3d) drop('clouds3d')
+      if (!on.weather3d) drop('weather3d')
+
+      const dt = file.prefabs.engine.dt
+      const truth = boot(file, sim)
+      window.__scenes = await load(truth, import.meta.url)
+      let client
+      const page = view(link(loopback(accept(manager(truth)))), file, import.meta.url, (me, scene) => {
+        client = me
+        for (const surface of [me.plugins.render3d ?? me.plugins.render2d, me.plugins.ui]) {
+          if (!surface) continue
+          const canvas = document.createElement('canvas')
+          canvas.width = scene.prefabs.engine.width
+          canvas.height = scene.prefabs.engine.height
+          document.body.appendChild(canvas)
+          surface.mount(canvas)
+        }
+        me.plugins.stats?.mount(document.body)
+      })
+      window.__page = page
+
+      // The panel. Keys typed into it reach neither this page nor the eye.
+      const gui = new GUI({ title: 'demo_skydome3d' })
+      for (const type of ['keydown', 'keyup']) gui.domElement.addEventListener(type, e => e.stopPropagation())
+
+      const plugins = gui.addFolder('plugins')
+      const reload = () => {
+        const next = new URLSearchParams(location.search)
+        next.set('weather', on.weather3d ? '1' : '0')
+        next.set('clouds', on.clouds3d ? '1' : '0')
+        location.search = next.toString()
+      }
+      plugins.add(on, 'weather3d').onChange(reload)
+      plugins.add(on, 'clouds3d').onChange(reload)
+
+      // Each number of each look, its range and step.
+      const SKY = {
+        exposure: [0, 4, 0.01], nightOpen: [0, 2, 0.01], sunIntensity: [0, 10, 0.05], moonIntensity: [0, 3, 0.01],
+        hemiDay: [0, 3, 0.01], hemiNight: [0, 1, 0.005], stars: [0, 4, 0.01], haze: [0, 0.01, 0.00005], mist: [0, 0.1, 0.0005],
+        starSize: [0.01, 0.5, 0.005], twinkle: [0, 1, 0.01], twinkles: [0, 3000, 10], twinkleSpread: [1, 12, 1],
+        sunEdge: [0, 1, 0.01], moonEdge: [0, 1, 0.01], moonSize: [0.001, 0.05, 0.0005], radius: [1000, 9000, 50],
+        overcast: [0, 1, 0.01], envSun: [0.001, 0.5, 0.001], envMix: [0.001, 0.5, 0.001], envIntensity: [0, 2, 0.01],
+      }
+      const SKY_COLOURS = ['dayZenith', 'dayHorizon', 'nightZenith', 'nightHorizon', 'setZenith', 'setHorizon', 'sunHigh', 'sunLow', 'moon', 'ground']
+      const SHADOW = { half: [5, 400, 1], near: [0.1, 50, 0.1], far: [100, 6000, 10], bias: [-0.001, 0.001, 0.000005], normalBias: [0, 0.5, 0.005] }
+      const WEATHER = { snowScale: [0.001, 0.5, 0.001], snowSharp: [0, 1, 0.01], flash: [0, 3, 0.01] }
+      const PRECIP = {
+        rain: [0, 120000, 100], snow: [0, 120000, 100], dust: [0, 20000, 10], splashes: [0, 2000, 1], range: [4, 80, 0.5], edge: [0, 20, 0.1], near: [0, 10, 0.1],
+        rainFall: [0, 40, 0.1], rainLen: [0.01, 2, 0.01], rainWidth: [0.001, 0.1, 0.001], rainOpacity: [0, 1, 0.01],
+        snowFall: [0, 10, 0.05], snowSize: [0.005, 0.3, 0.001], snowOpacity: [0, 1, 0.01],
+        dustFall: [0, 5, 0.01], dustSize: [0.005, 0.3, 0.001], dustOpacity: [0, 1, 0.01], swayPeriod: [1, 600, 1],
+        splashSize: [0.01, 1, 0.01], splashLife: [0.05, 3, 0.01], splashOpacity: [0, 1, 0.01], splashRing: [0.01, 1, 0.01], lift: [0, 0.5, 0.005], keyShare: [0, 2, 0.01],
+      }
+      const CLOUDS = {
+        cloudScale: [0.0002, 0.02, 0.0001], cloudSharp: [0, 1, 0.01], cloudDrift: [0, 1, 0.005], cloudShadow: [0, 1, 0.01], godrays: [0, 4, 0.01],
+        cloudLit: [0, 2, 0.01], cloudShade: [0, 1, 0.01], lining: [0, 3, 0.01], cirrusAlpha: [0, 1, 0.01],
+      }
+      // A slider for each number `ranges` names, setting `o`, and `then` after each change.
+      const sliders = (folder, o, ranges, then) => {
+        for (const [key, [lo, hi, step]] of Object.entries(ranges)) folder.add(o, key, lo, hi, step).onChange(then)
+      }
+      // A [a, b, c] sway's three numbers.
+      const sway = (folder, list, name, then) => {
+        folder.add(list, 0, 0, 3, 0.01).name(`${name} metres`).onChange(then)
+        folder.add(list, 1, 0, 6, 0.01).name(`${name} rad/s`).onChange(then)
+        folder.add(list, 2, 0, 1, 0.01).name(`${name} spread`).onChange(then)
+      }
+
+      let shown = null
+      function panel(me) {
+        const scenes = window.__scenes
+        const name = [...scenes.keys()].find(n => scenes.get(n).rows.some(r => r.kind === 'skydome3d'))
+        const world = me.plugins.wire.scene.world
+        const rowOf = kind => scenes.get(name)?.rows.find(r => r.kind === kind)
+        if (!world.skydome3d || !rowOf('skydome3d')) return false
+        const folder = gui.addFolder(name)
+        shown = { me, folder }
+        const copies = {}
+
+        const clock = folder.addFolder('clock')
+        const day = world.skydome3d.day
+        const sky = () => rowOf('skydome3d').data
+        const at = {
+          get hour() { return (sky().t / day) * 24 }, set hour(h) { sky().t = (h / 24) * day },
+          get rate() { return sky().rate }, set rate(v) { sky().rate = v },
+          get doy() { return sky().doy }, set doy(v) { sky().doy = v },
+          get lat() { return sky().lat }, set lat(v) { sky().lat = v },
+          get phase() { return sky().phase }, set phase(v) { sky().phase = v },
+        }
+        clock.add(at, 'hour', 0, 24, 0.01).name('hour of the day').listen()
+        clock.add(at, 'rate', 0, 200, 0.5).name('clock rate').listen()
+        clock.add(at, 'doy', 1, 365, 1).name('day of the year').listen()
+        clock.add(at, 'lat', -90, 90, 0.5).name('latitude').listen()
+        clock.add(at, 'phase', 0, 0.999, 0.001).name('moon phase').listen()
+
+        if (world.weather3d && rowOf('weather3d')) {
+          const table = me.plugins.loader.get(world.weather3d.weathers)
+          const wf = folder.addFolder('weather')
+          const wx = () => rowOf('weather3d').data
+          const pick = { weather: wx().to, fade: 10 }
+          // As the weather act does: the standing mix is where the fade starts.
+          const fade = () => { const d = wx(); d.from = { ...d.mix }; d.to = pick.weather; d.blend = 0; d.fade = pick.fade }
+          wf.add(pick, 'weather', Object.keys(table)).onChange(fade)
+          wf.add(pick, 'fade', 0, 120, 1).name('fade seconds')
+          const ground = {
+            get wet() { return wx().wet }, set wet(v) { wx().wet = v },
+            get pack() { return wx().pack }, set pack(v) { wx().pack = v },
+            get windDeg() { return wx().windDeg }, set windDeg(v) { wx().windDeg = v },
+          }
+          wf.add(ground, 'wet', 0, 1, 0.01).name('ground wet').listen()
+          wf.add(ground, 'pack', 0, 1.2, 0.01).name('snow lying').listen()
+          wf.add(ground, 'windDeg', 0, 360, 1).name('wind toward °').listen()
+
+          const look = copies.weatherLook = structuredClone(world.weather3d.look)
+          const setLook = () => { world.weather3d.look = structuredClone(look) }
+          sliders(wf.addFolder('weather look'), look, WEATHER, setLook)
+          const precip = copies.precip = structuredClone(world.weather3d.precip)
+          const setPrecip = () => { world.weather3d.precip = structuredClone(precip) }
+          const pf = wf.addFolder('rain, snow, dust and splashes')
+          pf.close()
+          sliders(pf, precip, PRECIP, setPrecip)
+          pf.addColor(precip, 'dustColour').onChange(setPrecip)
+          sway(pf, precip.snowSway, 'snow sway', setPrecip)
+          sway(pf, precip.dustSway, 'dust sway', setPrecip)
+        }
+
+        if (world.clouds3d) {
+          const look = copies.cloudsLook = structuredClone(world.clouds3d.look)
+          const setLook = () => { world.clouds3d.look = structuredClone(look) }
+          sliders(folder.addFolder('clouds'), look, CLOUDS, setLook)
+        }
+
+        const skyLook = copies.skyLook = structuredClone(world.skydome3d.look)
+        const setSky = () => { world.skydome3d.look = structuredClone(skyLook) }
+        const lf = folder.addFolder('sky look')
+        lf.close()
+        for (const key of SKY_COLOURS) lf.addColor(skyLook, key).onChange(setSky)
+        sliders(lf, skyLook, SKY, setSky)
+        lf.add(skyLook.sunShrink, 0, -0.5, 1, 0.01).name('sunShrink lo').onChange(setSky)
+        lf.add(skyLook.sunShrink, 1, -0.5, 1, 0.01).name('sunShrink hi').onChange(setSky)
+
+        const shadow = copies.shadow = structuredClone(world.skydome3d.shadow)
+        const setShadow = () => { world.skydome3d.shadow = structuredClone(shadow) }
+        const sf = folder.addFolder('shadow')
+        sf.close()
+        sf.add(shadow, 'map', [512, 1024, 2048, 4096]).onChange(setShadow)
+        sliders(sf, shadow, SHADOW, setShadow)
+
+        folder.add({ copy: () => navigator.clipboard?.writeText(JSON.stringify(copies, null, 2)) }, 'copy').name('copy JSON')
+        return true
+      }
+
+      // The panel follows the client the seat is on.
+      const follow = () => {
+        if (!client || client === shown?.me) return
+        shown?.folder.destroy()
+        shown = null
+        panel(client)
+      }
+
+      let last = performance.now(), owed = 0
+      const loop = async now => {
+        owed += Math.min((now - last) / 1000, 0.25)
+        last = now
+        page.input()
+        while (owed >= dt) { truth.step(dt); owed -= dt }
+        await page.frame(owed / dt)
+        follow()
+        requestAnimationFrame(loop)
+      }
+      requestAnimationFrame(loop)
+    </script>
+  </body>
+</html>
